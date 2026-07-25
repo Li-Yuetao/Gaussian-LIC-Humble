@@ -15,6 +15,48 @@
 
 Gaussian-LIC is a photo-realistic LiDAR-Inertial-Camera Gaussian Splatting SLAM system, which simultaneously performs robust, accurate pose estimation and constructs a photo-realistic 3D Gaussian map in real time.
 
+## ROS 2 Humble workspace
+
+The ROS 2 build reuses the local OpenCV, LibTorch, TensorRT, SPNet engines,
+and LPIPS assets. The installed OpenCV and LibTorch were built against CUDA
+11.7, so this package deliberately uses `/usr/local/cuda-11.7`; the NVIDIA
+580 driver remains backward compatible with that runtime. Compute 8.6 PTX is
+embedded and JIT-compiled by the driver for the RTX 4090.
+
+```shell
+cd /home/lyt/workspace/lic_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select gaussian_lic --symlink-install --cmake-args \
+  -DOpenCV_DIR=/home/lyt/cpp_lib/opencv-4.7.0/build \
+  -DTorch_DIR=/home/lyt/cpp_lib/libtorch/share/cmake/Torch \
+  -DTENSORRT_ROOT=/home/lyt/cpp_lib/TensorRT-8.6.1.6 \
+  -DCUDAToolkit_ROOT=/usr/local/cuda-11.7
+source install/setup.bash
+
+# Gaussian backend only
+ros2 launch gaussian_lic fastlivo2.launch.py
+
+# Gaussian backend first, then Coco-LIC with the configured rosbag2
+ros2 launch gaussian_lic cocolic_gaussian.launch.py
+```
+
+For the SimLab Avia scanner calibrated by `avia_simlab.yaml` and
+`camera_pinhole_simlab.yaml`, use the dedicated profile and pass the absolute
+rosbag2 directory:
+
+```shell
+ros2 launch gaussian_lic simlab.launch.py \
+  bag_path:=/absolute/path/to/your_rosbag2 \
+  rviz:=true
+```
+
+The bag must contain `/livox/lidar`
+(`livox_interfaces/msg/CustomMsg`), `/livox/imu`
+(`sensor_msgs/msg/Imu`), and `/camera/image`
+(`sensor_msgs/msg/Image`). The native 1920x1200 image and sparse depth are
+resized to 640x480 inside Gaussian-LIC, with scaled intrinsics, to reuse the
+installed SPNet 480x640 TensorRT engine.
+
 <p align="center">
     <img src="figure/r1_compressed.gif" alt="Logo" width="32%">
     <img src="figure/r0_compressed.gif" alt="Logo" width="32%">

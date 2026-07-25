@@ -20,10 +20,6 @@
 #include "tensor_utils.h"
 #include "loss_utils.h"
 
-#include <tf/tf.h>
-#include <tf/transform_broadcaster.h>
-#include <tf_conversions/tf_eigen.h>
-
 #include <sstream>
 #include <iomanip>
 #include <random>
@@ -35,8 +31,133 @@
 #include <limits>
 #include <torch/script.h>
 #include <memory>
+#include <cstring>
+
+#include <sensor_msgs/msg/image.hpp>
 
 namespace fs = std::filesystem;
+
+/// External ROS publishers (defined in mapping.cpp)
+extern rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rendered_rgb_pub;
+extern rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rendered_depth_pub;
+
+namespace
+{
+cv::Mat imageMessageToMat(
+    const sensor_msgs::msg::Image::ConstSharedPtr &message,
+    const std::string &expected_encoding,
+    int cv_type)
+{
+    if (!message || message->encoding != expected_encoding)
+    {
+        throw std::runtime_error(
+            "expected image encoding " + expected_encoding + ", got " +
+            (message ? message->encoding : std::string("<null>")));
+    }
+    const std::size_t required_step =
+        static_cast<std::size_t>(message->width) * CV_ELEM_SIZE(cv_type);
+    if (message->step < required_step ||
+        message->data.size() <
+            static_cast<std::size_t>(message->height) * message->step)
+    {
+        throw std::runtime_error("invalid ROS image buffer size");
+    }
+    return cv::Mat(
+               static_cast<int>(message->height),
+               static_cast<int>(message->width),
+               cv_type,
+               const_cast<unsigned char *>(message->data.data()),
+               message->step)
+        .clone();
+}
+
+sensor_msgs::msg::Image matToImageMessage(
+    const cv::Mat &input, const std::string &encoding)
+{
+    const cv::Mat image = input.isContinuous() ? input : input.clone();
+    sensor_msgs::msg::Image message;
+    message.header.frame_id = "camera";
+    message.header.stamp = rclcpp::Clock(RCL_ROS_TIME).now();
+    message.height = static_cast<uint32_t>(image.rows);
+    message.width = static_cast<uint32_t>(image.cols);
+    message.encoding = encoding;
+    message.is_bigendian = false;
+    message.step = static_cast<sensor_msgs::msg::Image::_step_type>(
+        image.cols * image.elemSize());
+    message.data.assign(
+        image.data, image.data + static_cast<std::size_t>(image.rows) *
+                                     message.step);
+    return message;
+}
+}  // namespace
+
+/// Helper function to publish rendered images
+void publishRenderedImages(const torch::Tensor& rendered_image,
+                          const torch::Tensor& rendered_depth,
+                          uint32_t frame_id)
+{
+    if (!rendered_rgb_pub || !rendered_depth_pub) return;
+
+    try {
+        // Convert RGB image (3 x H x W, float32 [0, 1]) to cv::Mat
+        auto rgb_cpu = rendered_image.permute({1, 2, 0}).cpu().contiguous();
+        int H = rgb_cpu.size(0);
+        int W = rgb_cpu.size(1);
+
+        cv::Mat rgb_cv(H, W, CV_32FC3);
+        std::memcpy(rgb_cv.data, rgb_cpu.data_ptr<float>(), H * W * 3 * sizeof(float));
+
+        // Convert float [0, 1] to uint8 [0, 255]
+        cv::Mat rgb_uint8;
+        cv::convertScaleAbs(rgb_cv * 255.0, rgb_uint8, 1.0, 0.0);
+        rgb_uint8.convertTo(rgb_uint8, CV_8UC3);
+
+        // Convert depth image (1 x H x W or H x W, float32) to cv::Mat
+        torch::Tensor depth_tensor = rendered_depth.squeeze();
+        if (depth_tensor.dim() != 2) {
+            depth_tensor = depth_tensor.squeeze(0);
+        }
+        auto depth_cpu = depth_tensor.cpu().contiguous();
+
+        cv::Mat depth_cv(depth_cpu.size(0), depth_cpu.size(1), CV_32FC1);
+        std::memcpy(depth_cv.data, depth_cpu.data_ptr<float>(),
+                   depth_cpu.size(0) * depth_cpu.size(1) * sizeof(float));
+
+        // Publish RGB image
+        rendered_rgb_pub->publish(matToImageMessage(rgb_uint8, "rgb8"));
+
+        // Publish depth image (as 32-bit float)
+        rendered_depth_pub->publish(matToImageMessage(depth_cv, "32FC1"));
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error publishing rendered images: " << e.what() << std::endl;
+    }
+}
+
+/// Render and publish the current view (latest added frame)
+void renderAndPublishCurrentView(const std::shared_ptr<Dataset>& dataset,
+                                 std::shared_ptr<GaussianModel>& pc,
+                                 uint32_t frame_id)
+{
+    if (!rendered_rgb_pub || !rendered_depth_pub) return;
+    if (dataset->train_cameras_.empty()) return;
+
+    try {
+        torch::Tensor bg;
+        if (pc->white_background_) bg = torch::ones({3}, torch::kFloat32).cuda();
+        else bg = torch::zeros({3}, torch::kFloat32).cuda();
+
+        // Render the latest frame (current view)
+        const std::shared_ptr<Camera>& current_camera = dataset->train_cameras_.back();
+        auto render_pkg = render(current_camera, pc, bg, pc->apply_exposure_);
+        auto rendered_image = std::get<0>(render_pkg);
+        auto rendered_depth = std::get<1>(render_pkg);
+
+        publishRenderedImages(rendered_image, rendered_depth, frame_id);
+    } catch (const std::exception& e) {
+        std::cerr << "Error in renderAndPublishCurrentView: " << e.what() << std::endl;
+    }
+}
 
 struct PixelPosition 
 {
@@ -106,23 +227,31 @@ std::vector<PixelPosition> selectFromDepthCompletion(const cv::Mat& depth_A, con
 void Dataset::addFrame(Frame& cur_frame)
 {
     /// image
-    cv_bridge::CvImagePtr cv_ptr;
-    cv_ptr = cv_bridge::toCvCopy(cur_frame.image_msg, sensor_msgs::image_encodings::BGR8);
-    cv::Mat image_bgr = cv_ptr->image;
+    cv::Mat image_bgr =
+        imageMessageToMat(cur_frame.image_msg, "bgr8", CV_8UC3);
     cv::Mat image_rgb;
     cv::cvtColor(image_bgr, image_rgb, cv::COLOR_BGR2RGB);  // 0-255
     image_rgb.convertTo(image_rgb, CV_32FC3, 1.0f / 255.0f);  // 0-1
 
     /// depth
-    cv_bridge::CvImagePtr dp_ptr;
-    dp_ptr = cv_bridge::toCvCopy(cur_frame.depth_msg, sensor_msgs::image_encodings::TYPE_32FC1);
-    cv::Mat depth_map = dp_ptr->image;  // metric float32
+    cv::Mat depth_map =
+        imageMessageToMat(cur_frame.depth_msg, "32FC1", CV_32FC1);
+
+    if (image_rgb.cols != target_width_ || image_rgb.rows != target_height_)
+    {
+        cv::resize(
+            image_rgb, image_rgb, cv::Size(target_width_, target_height_),
+            0.0, 0.0, cv::INTER_AREA);
+        cv::resize(
+            depth_map, depth_map, cv::Size(target_width_, target_height_),
+            0.0, 0.0, cv::INTER_NEAREST);
+    }
 
     /// pose
     Eigen::Quaterniond q_wc;
     Eigen::Vector3d t_wc;
-    tf::quaternionMsgToEigen(cur_frame.pose_msg->pose.orientation, q_wc);
-    tf::pointMsgToEigen(cur_frame.pose_msg->pose.position, t_wc);
+    tf2::fromMsg(cur_frame.pose_msg->pose.orientation, q_wc);
+    tf2::fromMsg(cur_frame.pose_msg->pose.position, t_wc);
     R_wc_.push_back(q_wc.toRotationMatrix());
     t_wc_.push_back(t_wc);
 
@@ -150,7 +279,7 @@ void Dataset::addFrame(Frame& cur_frame)
         if (depth_completion_)
         {
             cv::Mat completed_depth;  // metric float32
-            completed_depth = depth_completer_.complete(image_rgb, depth_map);
+            completed_depth = depth_completer_->complete(image_rgb, depth_map);
 
             cv::Mat mask_known = depth_map > 0;  // 0/255 uint8
             cv::Mat completed_depth_known;

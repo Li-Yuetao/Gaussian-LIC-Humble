@@ -1,0 +1,4 @@
+ament_prepend_unique_value LD_LIBRARY_PATH "@CUDAToolkit_ROOT@/lib64"
+ament_prepend_unique_value LD_LIBRARY_PATH "@OpenCV_DIR@/lib"
+ament_prepend_unique_value LD_LIBRARY_PATH "@Torch_DIR@/../../../lib"
+ament_prepend_unique_value LD_LIBRARY_PATH "@TENSORRT_ROOT@/lib"

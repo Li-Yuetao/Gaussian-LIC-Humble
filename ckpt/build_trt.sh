@@ -1,28 +1,27 @@
 #!/usr/bin/env bash
 set -e
 
-TENSORRT_ROOT=~/Software/TensorRT-8.6.1.6
-TRT_BIN=$TENSORRT_ROOT/bin/trtexec
-TRT_LIB=$TENSORRT_ROOT/targets/x86_64-linux-gnu/lib
+export TRT_ROOT=/home/lyt/cpp_lib/TensorRT-8.6.1.6
+export CUDA_HOME=/usr/local/cuda-11.7
+export PATH=$TRT_ROOT/bin:$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$TRT_ROOT/lib:$CUDA_HOME/lib64:$CUDA_HOME/targets/x86_64-linux/lib
 
-echo ">>> Deactivating conda env (if any)"
-conda deactivate || true
+TRT_BIN=$TRT_ROOT/bin/trtexec
 
-echo ">>> Setting TensorRT LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$TRT_LIB
-
-echo ">>> Building TensorRT engine: 512x640"
+echo ">>> Building TensorRT engine: 480x640 FP16"
 $TRT_BIN \
-  --onnx=spnet_512_640.onnx \
-  --saveEngine=spnet_512_640.engine \
-  --fp16 \
-  --optShapes=rgb:1x3x512x640,depth:1x1x512x640,mask:1x1x512x640
-
-echo ">>> Building TensorRT engine: 480x640"
-$TRT_BIN \
-  --onnx=spnet_480_640.onnx \
+  --onnx=spnet_480_640_int32_sim.onnx \
   --saveEngine=spnet_480_640.engine \
   --fp16 \
-  --optShapes=rgb:1x3x480x640,depth:1x1x480x640,mask:1x1x480x640
+  --builderOptimizationLevel=0 \
+  --memPoolSize=workspace:4096
 
-echo ">>> TensorRT engine build finished."
+echo ">>> Building TensorRT engine: 512x640 FP16"
+$TRT_BIN \
+  --onnx=spnet_512_640_int32_sim.onnx \
+  --saveEngine=spnet_512_640.engine \
+  --fp16 \
+  --builderOptimizationLevel=0 \
+  --memPoolSize=workspace:4096
+
+echo ">>> Done."

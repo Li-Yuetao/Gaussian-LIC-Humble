@@ -27,46 +27,59 @@
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <filesystem>
 
 std::mutex m_buf;
 std::condition_variable con;
 
-std::queue<sensor_msgs::PointCloud2ConstPtr> point_buf;
-std::queue<geometry_msgs::PoseStampedConstPtr> pose_buf;
-std::queue<sensor_msgs::ImageConstPtr> image_buf;
-std::queue<sensor_msgs::ImageConstPtr> depth_buf;
+std::queue<sensor_msgs::msg::PointCloud2::ConstSharedPtr> point_buf;
+std::queue<geometry_msgs::msg::PoseStamped::ConstSharedPtr> pose_buf;
+std::queue<sensor_msgs::msg::Image::ConstSharedPtr> image_buf;
+std::queue<sensor_msgs::msg::Image::ConstSharedPtr> depth_buf;
 
 std::atomic<bool> exit_flag(false);
 std::atomic<double> last_point_time(0.0);
 std::atomic<bool> gaussians_initialized(false);
 
-void pointCallback(const sensor_msgs::PointCloud2ConstPtr& point_msg) 
+/// ROS publishers for rendered images (declared globally)
+using ImagePublisher = rclcpp::Publisher<sensor_msgs::msg::Image>;
+ImagePublisher::SharedPtr rendered_rgb_pub = nullptr;
+ImagePublisher::SharedPtr rendered_depth_pub = nullptr;
+
+void pointCallback(
+    const sensor_msgs::msg::PointCloud2::ConstSharedPtr point_msg)
 {
-    m_buf.lock();
+    std::lock_guard<std::mutex> lock(m_buf);
     point_buf.push(point_msg);
-    last_point_time = ros::Time::now().toSec();
-    m_buf.unlock();
+    last_point_time = rclcpp::Clock(RCL_ROS_TIME).now().seconds();
+    con.notify_one();
 }
 
-void poseCallback(const geometry_msgs::PoseStampedConstPtr& pose_msg) 
+// Forward declaration of render function for current view
+void renderAndPublishCurrentView(const std::shared_ptr<Dataset>& dataset,
+                                 std::shared_ptr<GaussianModel>& pc,
+                                 uint32_t frame_id);
+
+void poseCallback(
+    const geometry_msgs::msg::PoseStamped::ConstSharedPtr pose_msg)
 {
-    m_buf.lock();
+    std::lock_guard<std::mutex> lock(m_buf);
     pose_buf.push(pose_msg);
-    m_buf.unlock();
+    con.notify_one();
 }
 
-void imageCallback(const sensor_msgs::ImageConstPtr& image_msg) 
+void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr image_msg)
 {
-    m_buf.lock();
+    std::lock_guard<std::mutex> lock(m_buf);
     image_buf.push(image_msg);
-    m_buf.unlock();
+    con.notify_one();
 }
 
-void depthCallback(const sensor_msgs::ImageConstPtr& depth_msg) 
+void depthCallback(const sensor_msgs::msg::Image::ConstSharedPtr depth_msg)
 {
-    m_buf.lock();
+    std::lock_guard<std::mutex> lock(m_buf);
     depth_buf.push(depth_msg);
-    m_buf.unlock();
+    con.notify_one();
 }
 
 bool getAlignedData(Frame& cur_frame)
@@ -76,11 +89,11 @@ bool getAlignedData(Frame& cur_frame)
         return false;
     }
 
-    double frame_time = point_buf.front()->header.stamp.toSec();
+    double frame_time = rclcpp::Time(point_buf.front()->header.stamp).seconds();
 
     while (1) 
     {
-        if (pose_buf.front()->header.stamp.toSec() < frame_time - 0.01) 
+        if (rclcpp::Time(pose_buf.front()->header.stamp).seconds() < frame_time - 0.01)
         {
             pose_buf.pop();
             if (pose_buf.empty()) 
@@ -90,7 +103,7 @@ bool getAlignedData(Frame& cur_frame)
         } 
         else break;
     }
-    if (pose_buf.front()->header.stamp.toSec() > frame_time + 0.01) 
+    if (rclcpp::Time(pose_buf.front()->header.stamp).seconds() > frame_time + 0.01)
     {
         point_buf.pop();
         return false;
@@ -98,7 +111,7 @@ bool getAlignedData(Frame& cur_frame)
 
     while (1) 
     {
-        if (image_buf.front()->header.stamp.toSec() < frame_time - 0.01) 
+        if (rclcpp::Time(image_buf.front()->header.stamp).seconds() < frame_time - 0.01)
         {
             image_buf.pop();
             if (image_buf.empty()) 
@@ -108,7 +121,7 @@ bool getAlignedData(Frame& cur_frame)
         } 
         else break;
     }
-    if (image_buf.front()->header.stamp.toSec() > frame_time + 0.01) 
+    if (rclcpp::Time(image_buf.front()->header.stamp).seconds() > frame_time + 0.01)
     {
         point_buf.pop();
         return false;
@@ -116,7 +129,7 @@ bool getAlignedData(Frame& cur_frame)
 
     while (1) 
     {
-        if (depth_buf.front()->header.stamp.toSec() < frame_time - 0.01) 
+        if (rclcpp::Time(depth_buf.front()->header.stamp).seconds() < frame_time - 0.01)
         {
             depth_buf.pop();
             if (depth_buf.empty()) 
@@ -126,7 +139,7 @@ bool getAlignedData(Frame& cur_frame)
         } 
         else break;
     }
-    if (depth_buf.front()->header.stamp.toSec() > frame_time + 0.01) 
+    if (rclcpp::Time(depth_buf.front()->header.stamp).seconds() > frame_time + 0.01)
     {
         point_buf.pop();
         return false;
@@ -167,9 +180,14 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
     while (!exit_flag)
     {
         /// [1] data alignment
-        m_buf.lock();
+        std::unique_lock<std::mutex> lock(m_buf);
+        con.wait_for(lock, std::chrono::milliseconds(10), [] {
+            return exit_flag ||
+                   (!point_buf.empty() && !pose_buf.empty() &&
+                    !image_buf.empty() && !depth_buf.empty());
+        });
         bool align_flag = getAlignedData(cur_frame);
-        m_buf.unlock();
+        lock.unlock();
         if (!align_flag) continue;
         
         /// [2] add every frame
@@ -211,9 +229,19 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
         std::cout << std::fixed << std::setprecision(2) 
                   << "\033[1;36m Update " << updated_num / 10000 
                   << "w GS per Iter \033[0m" << std::endl;
+
+        /// [6] publish current view rendering
+        renderAndPublishCurrentView(dataset, gaussians, dataset->all_frame_num_ - 1);
     }
 
-    /// [6] evaluation
+    if (dataset->all_frame_num_ == 0)
+    {
+        std::cout << "\nGaussian-LIC stopped before receiving a complete frame."
+                  << std::endl;
+        return;
+    }
+
+    /// [7] evaluation
     std::cout << "\n     🎉 Runtime Statistics 🎉\n";
     std::cout << std::fixed << std::setprecision(2) << "\n        [Total Mapping Time] " << total_mapping_time << "s" << std::endl;
     std::cout << std::fixed << std::setprecision(2) << "         1) Forward " << gaussians->t_forward_ << "s" << std::endl;
@@ -232,43 +260,79 @@ void mapping(const YAML::Node& node, const std::string& result_path, const std::
 int main(int argc, char** argv)
 {
     std::cout << "\n\n😋 Gaussian-LIC Ready!\n\n\n";
-    ros::init(argc, argv, "gaussianlic");
-    ros::NodeHandle nh("~");
-    ros::Rate loop_rate(1000);
-    image_transport::ImageTransport it_(nh);
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<rclcpp::Node>("gaussianlic");
+    rclcpp::on_shutdown([] {
+        exit_flag = true;
+        con.notify_all();
+    });
+    auto qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+    auto sub_point = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/points_for_gs", qos, pointCallback);
+    auto sub_pose = node->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/pose_for_gs", qos, poseCallback);
+    auto image_sub = node->create_subscription<sensor_msgs::msg::Image>(
+        "/image_for_gs", qos, imageCallback);
+    auto depth_sub = node->create_subscription<sensor_msgs::msg::Image>(
+        "/depth_for_gs", qos, depthCallback);
 
-    ros::Subscriber sub_point = nh.subscribe("/points_for_gs", 10000, pointCallback);
-    ros::Subscriber sub_pose = nh.subscribe("/pose_for_gs", 10000, poseCallback);
-    image_transport::Subscriber image_sub = it_.subscribe("/image_for_gs", 10000, imageCallback);
-    image_transport::Subscriber depth_sub = it_.subscribe("/depth_for_gs", 10000, depthCallback);
+    /// Initialize rendered image publishers
+    rendered_rgb_pub =
+        node->create_publisher<sensor_msgs::msg::Image>("/render_rgb", 1);
+    rendered_depth_pub =
+        node->create_publisher<sensor_msgs::msg::Image>("/render_depth", 1);
 
-    std::string config_path;
-    nh.param<std::string>("config_path", config_path, "");
+    const std::string share_dir =
+        ament_index_cpp::get_package_share_directory("gaussian_lic");
+    std::string config_path = node->declare_parameter<std::string>(
+        "config_path", share_dir + "/config/fastlivo2.yaml");
     YAML::Node config_node = YAML::LoadFile(config_path);
-    std::string result_path;
-    nh.param<std::string>("result_path", result_path, "");
-    std::string lpips_path;
-    nh.param<std::string>("lpips_path", lpips_path, "");
+    std::string result_path = node->declare_parameter<std::string>(
+        "result_path",
+        (std::filesystem::current_path() / "result").string());
+    std::string lpips_path = node->declare_parameter<std::string>(
+        "lpips_path", share_dir + "/lpips");
+    std::filesystem::create_directories(result_path);
 
     std::thread mapping_process(mapping, config_node, result_path, lpips_path);
     std::thread monitor_thread([](){
         while (!exit_flag) 
         {
-            double now = ros::Time::now().toSec();
-            if (gaussians_initialized && (now - last_point_time > 5.0)) 
+            double now = rclcpp::Clock(RCL_ROS_TIME).now().seconds();
+            if (last_point_time > 0.0 && (now - last_point_time > 5.0))
             {
-                m_buf.lock();
-                if (point_buf.empty()) exit_flag = true;
-                m_buf.unlock();
+                std::lock_guard<std::mutex> lock(m_buf);
+                if (point_buf.empty()) {
+                    exit_flag = true;
+                    con.notify_all();
+                }
             } 
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     });
     
-    ros::spin();
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(node);
+    while (rclcpp::ok() && !exit_flag)
+    {
+        executor.spin_some();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    executor.remove_node(node);
 
     mapping_process.join();
     monitor_thread.join();
-    
+
+    sub_point.reset();
+    sub_pose.reset();
+    image_sub.reset();
+    depth_sub.reset();
+    rendered_rgb_pub.reset();
+    rendered_depth_pub.reset();
+    node.reset();
+    if (rclcpp::ok())
+    {
+        rclcpp::shutdown();
+    }
     return 0;
 }

@@ -26,26 +26,21 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 
-#include <geometry_msgs/PoseStamped.h>
-#include <ros/ros.h>
-#include <ros/package.h>
-#include <sensor_msgs/Image.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <tf/tf.h>
-#include <tf/transform_broadcaster.h>
-#include <tf_conversions/tf_eigen.h>
-
-#include <cv_bridge/cv_bridge.h>
-#include <image_transport/image_transport.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 
-#include <eigen_conversions/eigen_msg.h>
 #include <Eigen/Eigen>
 
 #include <opencv2/core.hpp>
@@ -67,9 +62,16 @@ public:
         depth_completion = node["depth_completion"].as<bool>();
         patch_size = node["patch_size"].as<int>();
         max_depth = node["max_depth"].as<double>();
-        std::string pkg_path = ros::package::getPath("gaussian_lic");
+        std::string pkg_path =
+            ament_index_cpp::get_package_share_directory("gaussian_lic");
         if (height == 512 && width == 640) engine_path = pkg_path + "/ckpt/spnet_512_640.engine";
         if (height == 480 && width == 640) engine_path = pkg_path + "/ckpt/spnet_480_640.engine";
+        if (depth_completion && engine_path.empty())
+        {
+            throw std::runtime_error(
+                "depth_completion requires a 640x480 or 640x512 SPNet engine; "
+                "set width/height to a supported inference resolution");
+        }
 
         sh_degree = node["sh_degree"].as<int>();
         white_background = node["white_background"].as<bool>();
@@ -136,8 +138,8 @@ public:
 
 struct Frame 
 {
-    sensor_msgs::PointCloud2ConstPtr point_msg;
-    geometry_msgs::PoseStampedConstPtr pose_msg;
-    sensor_msgs::ImageConstPtr image_msg;
-    sensor_msgs::ImageConstPtr depth_msg;
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr point_msg;
+    geometry_msgs::msg::PoseStamped::ConstSharedPtr pose_msg;
+    sensor_msgs::msg::Image::ConstSharedPtr image_msg;
+    sensor_msgs::msg::Image::ConstSharedPtr depth_msg;
 };

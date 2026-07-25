@@ -54,11 +54,18 @@ class Dataset
 public:
     Dataset(const Params& prm)
       : fx_(prm.fx), fy_(prm.fy), cx_(prm.cx), cy_(prm.cy),
+        target_width_(prm.width), target_height_(prm.height),
         select_every_k_frame_(prm.select_every_k_frame),
         depth_completion_(prm.depth_completion),
         patch_size_(prm.patch_size), max_depth_(prm.max_depth),
-        all_frame_num_(0), is_keyframe_current_(false),
-        depth_completer_(prm.engine_path, prm.width, prm.height) {}
+        all_frame_num_(0), is_keyframe_current_(false)
+    {
+        if (depth_completion_)
+        {
+            depth_completer_ = std::make_unique<DepthCompleter>(
+                prm.engine_path, prm.width, prm.height);
+        }
+    }
         
     void addFrame(Frame& cur_frame);
 
@@ -67,6 +74,8 @@ public:
     double fy_;
     double cx_;
     double cy_;
+    int target_width_;
+    int target_height_;
 
     int select_every_k_frame_;
     bool depth_completion_;
@@ -87,7 +96,7 @@ public:
     std::vector<std::shared_ptr<Camera>> train_cameras_;
     std::vector<std::shared_ptr<Camera>> test_cameras_;
 
-    DepthCompleter depth_completer_;
+    std::unique_ptr<DepthCompleter> depth_completer_;
 };
 
 
