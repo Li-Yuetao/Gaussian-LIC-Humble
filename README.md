@@ -1,19 +1,23 @@
 <p align="center">
-  <h1 align="center">Gaussian-LIC: Real-Time Photo-Realistic SLAM with Gaussian Splatting and LiDAR-Inertial-Camera Fusion</h1>
+  <h1 align="center">Gaussian-LIC2: LiDAR-Inertial-Camera<br> Gaussian Splatting SLAM</h1>
   <p align="center">
-    ICRA 2025
+    ICRA 2025 & IJRR 2026
   </p>
   <p align="center">
     <a href="https://arxiv.org/pdf/2404.06926">
-      <img src='https://img.shields.io/badge/Paper-PDF-red?style=flat&logo=arXiv&logoColor=red' alt='Paper PDF'>
+      <img src='https://img.shields.io/badge/Gaussian--LIC-Paper-red?style=flat&logo=arXiv&logoColor=red' alt='Gaussian-LIC Paper PDF'>
     </a>
-    <a href='https://xingxingzuo.github.io/gaussian_lic/' style='padding-left: 0.5rem;'>
+    <a href="https://arxiv.org/pdf/2507.04004" style='padding-left: 0.5rem;'>
+      <img src='https://img.shields.io/badge/Gaussian--LIC2-Paper-red?style=flat&logo=arXiv&logoColor=red' alt='Gaussian-LIC2 Paper PDF'>
+    </a>
+    <a href='https://xingxingzuo.github.io/gaussian_lic2/' style='padding-left: 0.5rem;'>
       <img src='https://img.shields.io/badge/Project-Page-blue?style=flat&logo=Google%20chrome&logoColor=blue' alt='Project Page'>
     </a>
   </p>
 </p>
 
-Gaussian-LIC is a photo-realistic LiDAR-Inertial-Camera Gaussian Splatting SLAM system, which simultaneously performs robust, accurate pose estimation and constructs a photo-realistic 3D Gaussian map in real time.
+
+Gaussian-LIC2 is a photo-realistic LiDAR-Inertial-Camera Gaussian Splatting SLAM system, which simultaneously performs robust, accurate pose estimation and constructs a photo-realistic 3D Gaussian map in real time.
 
 ## ROS 2 Humble workspace
 
@@ -65,6 +69,7 @@ installed SPNet 480x640 TensorRT engine.
 
 ### 📢 News
 
+- [2026-07-25] Gaussian-LIC2 is accepted by the International Journal of Robotics Research (IJRR)! 🎉
 - [2026-02-21] Gaussian-LIC2 is released! 🚀 (stay tuned for updates)
 - [2025-07-08] Gaussian-LIC2 is unveiled! 🎉 [[`Paper`](https://arxiv.org/pdf/2507.04004)] [[`Page`](https://xingxingzuo.github.io/gaussian_lic2/)] [[`YouTube`](https://www.youtube.com/watch?v=SkPnpuCfh88)] [[`bilibili`](https://www.bilibili.com/video/BV1fJ3kzfEYv/?spm_id_from=333.337.search-card.all.click&vd_source=99ac6409fc9373f3960feff31c28a189)] 
 - [2025-07-07] The enhanced version of the Gaussian-LIC code is released!
@@ -210,11 +215,11 @@ If you find our work helpful, please consider citing 🌟:
 ```
 
 ```bibtex
-@article{lang2025gaussian2,
+@article{lang2026gaussian2,
   title={Gaussian-LIC2: LiDAR-Inertial-Camera Gaussian Splatting SLAM}, 
   author={Lang, Xiaolei and Lv, Jiajun and Tang, Kai and Li, Laijian and Huang, Jianxin and Liu, Lina and Liu, Yong and Zuo, Xingxing},
-  journal={arXiv}, 
-  year={2025}
+  journal={The International Journal of Robotics Research},
+  year={2026}
 }
 ```
 
