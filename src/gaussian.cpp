@@ -40,6 +40,7 @@ namespace fs = std::filesystem;
 /// External ROS publishers (defined in mapping.cpp)
 extern rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rendered_rgb_pub;
 extern rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rendered_depth_pub;
+extern rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr processed_rgb_pub;
 
 namespace
 {
@@ -72,12 +73,17 @@ cv::Mat imageMessageToMat(
 }
 
 sensor_msgs::msg::Image matToImageMessage(
-    const cv::Mat &input, const std::string &encoding)
+    const cv::Mat &input,
+    const std::string &encoding,
+    int32_t stamp_sec,
+    uint32_t stamp_nanosec,
+    const std::string &frame_id)
 {
     const cv::Mat image = input.isContinuous() ? input : input.clone();
     sensor_msgs::msg::Image message;
-    message.header.frame_id = "camera";
-    message.header.stamp = rclcpp::Clock(RCL_ROS_TIME).now();
+    message.header.frame_id = frame_id.empty() ? "camera" : frame_id;
+    message.header.stamp.sec = stamp_sec;
+    message.header.stamp.nanosec = stamp_nanosec;
     message.height = static_cast<uint32_t>(image.rows);
     message.width = static_cast<uint32_t>(image.cols);
     message.encoding = encoding;
@@ -89,28 +95,37 @@ sensor_msgs::msg::Image matToImageMessage(
                                      message.step);
     return message;
 }
+
+cv::Mat rgbTensorToUint8(const torch::Tensor &rgb_tensor)
+{
+    auto rgb_cpu =
+        rgb_tensor.detach().permute({1, 2, 0}).cpu().contiguous();
+    const int height = rgb_cpu.size(0);
+    const int width = rgb_cpu.size(1);
+    cv::Mat rgb_float(height, width, CV_32FC3);
+    std::memcpy(
+        rgb_float.data, rgb_cpu.data_ptr<float>(),
+        static_cast<std::size_t>(height) * width * 3 * sizeof(float));
+
+    cv::Mat rgb_uint8;
+    rgb_float.convertTo(rgb_uint8, CV_8UC3, 255.0);
+    return rgb_uint8;
+}
 }  // namespace
 
 /// Helper function to publish rendered images
 void publishRenderedImages(const torch::Tensor& rendered_image,
                           const torch::Tensor& rendered_depth,
-                          uint32_t frame_id)
+                          const Camera& camera)
 {
-    if (!rendered_rgb_pub || !rendered_depth_pub) return;
+    if (!rendered_rgb_pub || !rendered_depth_pub || !processed_rgb_pub) return;
 
     try {
-        // Convert RGB image (3 x H x W, float32 [0, 1]) to cv::Mat
-        auto rgb_cpu = rendered_image.permute({1, 2, 0}).cpu().contiguous();
-        int H = rgb_cpu.size(0);
-        int W = rgb_cpu.size(1);
-
-        cv::Mat rgb_cv(H, W, CV_32FC3);
-        std::memcpy(rgb_cv.data, rgb_cpu.data_ptr<float>(), H * W * 3 * sizeof(float));
-
-        // Convert float [0, 1] to uint8 [0, 255]
-        cv::Mat rgb_uint8;
-        cv::convertScaleAbs(rgb_cv * 255.0, rgb_uint8, 1.0, 0.0);
-        rgb_uint8.convertTo(rgb_uint8, CV_8UC3);
+        // Both images come from the exact CHW RGB float tensors used by the
+        // mapper: original_image_ is the photometric supervision target.
+        cv::Mat processed_rgb_uint8 =
+            rgbTensorToUint8(camera.original_image_);
+        cv::Mat rendered_rgb_uint8 = rgbTensorToUint8(rendered_image);
 
         // Convert depth image (1 x H x W or H x W, float32) to cv::Mat
         torch::Tensor depth_tensor = rendered_depth.squeeze();
@@ -123,11 +138,26 @@ void publishRenderedImages(const torch::Tensor& rendered_image,
         std::memcpy(depth_cv.data, depth_cpu.data_ptr<float>(),
                    depth_cpu.size(0) * depth_cpu.size(1) * sizeof(float));
 
-        // Publish RGB image
-        rendered_rgb_pub->publish(matToImageMessage(rgb_uint8, "rgb8"));
+        const auto make_message = [&](const cv::Mat &image,
+                                      const std::string &encoding) {
+            return matToImageMessage(
+                image, encoding, camera.stamp_sec_, camera.stamp_nanosec_,
+                camera.frame_id_);
+        };
+
+        // Publish the supervision and rendering with identical dimensions,
+        // camera pose/intrinsics, and source keyframe timestamp.
+        processed_rgb_pub->publish(
+            make_message(processed_rgb_uint8, "rgb8"));
+        rendered_rgb_pub->publish(
+            make_message(rendered_rgb_uint8, "rgb8"));
 
         // Publish depth image (as 32-bit float)
-        rendered_depth_pub->publish(matToImageMessage(depth_cv, "32FC1"));
+        cv::Mat depth_u8, depth_jet;
+        cv::normalize(depth_cv, depth_u8, 0, 255, cv::NORM_MINMAX, CV_8UC1);
+        cv::applyColorMap(depth_u8, depth_jet, cv::COLORMAP_JET);
+
+        rendered_depth_pub->publish(make_message(depth_jet, "bgr8"));
 
     } catch (const std::exception& e) {
         std::cerr << "Error publishing rendered images: " << e.what() << std::endl;
@@ -153,7 +183,7 @@ void renderAndPublishCurrentView(const std::shared_ptr<Dataset>& dataset,
         auto rendered_image = std::get<0>(render_pkg);
         auto rendered_depth = std::get<1>(render_pkg);
 
-        publishRenderedImages(rendered_image, rendered_depth, frame_id);
+        publishRenderedImages(rendered_image, rendered_depth, *current_camera);
     } catch (const std::exception& e) {
         std::cerr << "Error in renderAndPublishCurrentView: " << e.what() << std::endl;
     }
@@ -275,6 +305,9 @@ void Dataset::addFrame(Frame& cur_frame)
     {
         is_keyframe_current_ = true;
         std::shared_ptr<Camera> cam = std::make_shared<Camera>();
+        cam->stamp_sec_ = cur_frame.image_msg->header.stamp.sec;
+        cam->stamp_nanosec_ = cur_frame.image_msg->header.stamp.nanosec;
+        cam->frame_id_ = cur_frame.image_msg->header.frame_id;
 
         if (depth_completion_)
         {
@@ -347,6 +380,9 @@ void Dataset::addFrame(Frame& cur_frame)
     {
         is_keyframe_current_ = false;
         std::shared_ptr<Camera> cam = std::make_shared<Camera>();
+        cam->stamp_sec_ = cur_frame.image_msg->header.stamp.sec;
+        cam->stamp_nanosec_ = cur_frame.image_msg->header.stamp.nanosec;
+        cam->frame_id_ = cur_frame.image_msg->header.frame_id;
 
         cam->original_image_ = tensor_utils::cvMat2TorchTensor_Float32(image_rgb, torch::kCPU);
         cam->original_depth_ = tensor_utils::cvMat2TorchTensor_Float32(depth_map, torch::kCPU);

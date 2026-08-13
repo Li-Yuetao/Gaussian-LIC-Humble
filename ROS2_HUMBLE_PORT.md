@@ -30,6 +30,11 @@ Rendered output topics:
 | `/render_rgb` | `rgb8` |
 | `/render_depth` | `32FC1` |
 
+`/input_rgb_processed` publishes the exact resized RGB keyframe tensor used
+as Gaussian mapping supervision. It shares the resolution, camera timestamp,
+and frame ID of `/render_rgb`, making the two topics directly comparable in
+RViz2.
+
 ## GPU dependencies
 
 The CMake cache defaults reuse the libraries already installed on this
@@ -114,4 +119,3 @@ interpolation to preserve valid depth samples.
   4090.
 - Results are written under `result_path`, including `point_cloud.ply`,
   ground-truth images, RGB renders, and depth renders.
-

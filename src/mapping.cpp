@@ -45,6 +45,7 @@ std::atomic<bool> gaussians_initialized(false);
 using ImagePublisher = rclcpp::Publisher<sensor_msgs::msg::Image>;
 ImagePublisher::SharedPtr rendered_rgb_pub = nullptr;
 ImagePublisher::SharedPtr rendered_depth_pub = nullptr;
+ImagePublisher::SharedPtr processed_rgb_pub = nullptr;
 
 void pointCallback(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr point_msg)
@@ -281,6 +282,9 @@ int main(int argc, char** argv)
         node->create_publisher<sensor_msgs::msg::Image>("/render_rgb", 1);
     rendered_depth_pub =
         node->create_publisher<sensor_msgs::msg::Image>("/render_depth", 1);
+    processed_rgb_pub =
+        node->create_publisher<sensor_msgs::msg::Image>(
+            "/input_rgb_processed", 1);
 
     const std::string share_dir =
         ament_index_cpp::get_package_share_directory("gaussian_lic");
@@ -329,6 +333,7 @@ int main(int argc, char** argv)
     depth_sub.reset();
     rendered_rgb_pub.reset();
     rendered_depth_pub.reset();
+    processed_rgb_pub.reset();
     node.reset();
     if (rclcpp::ok())
     {

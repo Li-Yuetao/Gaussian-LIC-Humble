@@ -111,6 +111,9 @@ public:
 
 public:
     std::string image_name_;
+    int32_t stamp_sec_ = 0;
+    uint32_t stamp_nanosec_ = 0;
+    std::string frame_id_ = "camera";
 
     int image_width_;              
     int image_height_;
